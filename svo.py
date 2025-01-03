@@ -1,56 +1,75 @@
-import itertools
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
 from mpl_toolkits.mplot3d import Axes3D
 import pykitti
-
+import argparse
 
 def keypoints_to_np(keypoints):
     """
-    Converts a list of cv2.KeyPoint objects to a NumPy array of shape (N, 2).
-    
+    Converts a list of OpenCV keypoints to a NumPy array of their coordinates.
+
     Parameters:
-        keypoints (list of cv2.KeyPoint): The keypoints to convert.
-        
+        keypoints (list of cv2.KeyPoint): List of OpenCV keypoints.
+
     Returns:
-        np.ndarray: NumPy array of shape (N, 2) containing keypoint coordinates.
+        np.ndarray: Array of shape (N, 2) containing keypoint coordinates.
     """
+
     return np.float32([kp.pt for kp in keypoints]).reshape(-1, 2)
 
+
 def match_features(kp1, kp2, des1, des2, ratio):
-    matched_kp1, matched_kp2 = [], []
-    des1_matched, des2_matched = [], []
+    """
+    Matches features between two sets of keypoints and descriptors using the BFMatcher.
+
+    Parameters:
+        kp1 (list of cv2.KeyPoint): Keypoints from the first image.
+        kp2 (list of cv2.KeyPoint): Keypoints from the second image.
+        des1 (np.ndarray): Descriptors from the first image.
+        des2 (np.ndarray): Descriptors from the second image.
+        ratio (float): Lowe's ratio for filtering good matches.
+
+    Returns:
+        tuple: Matched keypoints and descriptors for both images and the matches list.
+    """
 
     bf = cv2.BFMatcher()
     matches = bf.knnMatch(des1, des2, k=2)
-    good_matches = []
-    for m, n in matches:
-        if m.distance < ratio * n.distance:
-            good_matches.append([m])
+    good_matches = [[m] for m, n in matches if m.distance < ratio * n.distance]
 
     if len(good_matches) > 4:
         matched_kp1 = [kp1[m[0].queryIdx] for m in good_matches]
         matched_kp2 = [kp2[m[0].trainIdx] for m in good_matches]
-
         des1_matched = np.float32([des1[m[0].queryIdx] for m in good_matches])
         des2_matched = np.float32([des2[m[0].trainIdx] for m in good_matches])
+        return matched_kp1, matched_kp2, des1_matched, des2_matched, good_matches
     else:
-        print("Insufficient good matches to estimate roto")
-
-    return matched_kp1, matched_kp2, des1_matched, des2_matched, good_matches
+        print("Insufficient good matches to estimate rotation.")
+        return None, None, None, None, []
 
 
 def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left, prev_des_left, 
                                 prev_kp_right, prev_des_right, ratio):
+    matched_current_left_kp, matched_prev_left_kp, _, _, matches1 = match_features(
+        current_kp_left, prev_kp_left, current_des_left, prev_des_left, ratio
+    )
     """
-    Matches features and ensures consistency across current_left, prev_left, and prev_right images.
+    Ensures consistency in feature matching across multiple frames.
+
+    Parameters:
+        current_kp_left (list of cv2.KeyPoint): Keypoints in the current left image.
+        current_des_left (np.ndarray): Descriptors in the current left image.
+        prev_kp_left (list of cv2.KeyPoint): Keypoints in the previous left image.
+        prev_des_left (np.ndarray): Descriptors in the previous left image.
+        prev_kp_right (list of cv2.KeyPoint): Keypoints in the previous right image.
+        prev_des_right (np.ndarray): Descriptors in the previous right image.
+        ratio (float): Lowe's ratio for filtering good matches.
 
     Returns:
-        consistent_kp_current_left (list): Consistent keypoints in the current left image.
-        consistent_kp_prev_left (list): Consistent keypoints in the previous left image.
-        consistent_kp_prev_right (list): Consistent keypoints in the previous right image.
+        tuple: Consistent keypoints from the current left, previous left, and previous right images.
     """
+
     # Match current_left and prev_left
     matched_current_left_kp, matched_prev_left_kp, _, _, matches1 = match_features(
         current_kp_left, prev_kp_left, current_des_left, prev_des_left, ratio
@@ -61,7 +80,7 @@ def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left,
         return None, None, None
     
     # Match prev_left and prev_right
-    matched_prev_left_kp_2, matched_prev_right_kp, _, _, matches2 = match_features(
+    _, matched_prev_right_kp, _, _, matches2 = match_features(
         prev_kp_left, prev_kp_right, prev_des_left, prev_des_right, ratio
     )
 
@@ -89,109 +108,132 @@ def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left,
     return consistent_kp_current_left, consistent_kp_prev_left, consistent_kp_prev_right
 
 
+def compute_odometry(dataset, real_time, sift_ratio=0.75):
+    """
+    Computes the odometry trajectory for a dataset using feature matching and triangulation.
 
-# Path to the KITTI dataset
-basedir = "C:/Users/prec1/Documents/fer/rspa/perception/data_odometry_gray/dataset"
+    Parameters:
+        dataset (pykitti.odometry): KITTI odometry dataset instance.
+        online (bool): If True, performs real-time visualization of the trajectory.
+        sift_ratio (float): Lowe's ratio for SIFT feature matching.
 
-# Specify the sequence to load
-sequence = '00'
+    Returns:
+        list: List of transformation matrices representing the trajectory.
+    """
 
-# Load the KITTI dataset
-dataset = pykitti.odometry(basedir, sequence)
-calibration = dataset.calib
-print(calibration)
+    # Initialize SIFT detector
+    sift = cv2.SIFT_create()
 
-# Initialize SIFT detector
-sift = cv2.SIFT_create()
+    # Initialize variables
+    prev_left_img, prev_right_img = None, None
+    prev_kp_left, prev_des_left = None, None
+    prev_kp_right, prev_des_right = None, None
+    trajectory = [np.eye(4)]
 
-# Initialize variables
-prev_left_img = None
-prev_right_img = None
-sift_ratio = 0.75
+    if real_time:
+        # Real-time visualization setup
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection='3d')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title('Estimated Camera Trajectory')
 
-# Iterate over the grayscale image pairs in the dataset
-for i, (current_left_img, current_right_img) in enumerate(dataset.gray):
-    # No need for lens distortion correction and rectification
+    for i, (current_left_img, current_right_img) in enumerate(dataset.gray):
+        current_left_img = np.array(current_left_img)
+        current_right_img = np.array(current_right_img)
 
-    # Convert PIL images to NumPy arrays
-    current_left_img = np.array(current_left_img)
-    current_right_img = np.array(current_right_img)
+        if i == 0:
+            prev_left_img, prev_right_img = current_left_img, current_right_img
+            continue
+        
+        # Get features and their descriptors for the left and right camera images
+        current_kp_left, current_des_left = sift.detectAndCompute(current_left_img, None)
+        current_kp_right, current_des_right = sift.detectAndCompute(current_right_img, None)
 
-    if i == 0:
-        prev_left_img = current_left_img
-        prev_right_img = current_right_img
-        continue
+        if prev_kp_left is None:
+            prev_kp_left, prev_des_left = sift.detectAndCompute(prev_left_img, None)
+        if prev_kp_right is None:
+            prev_kp_right, prev_des_right = sift.detectAndCompute(prev_right_img, None)
 
-    
-    # Detect SIFT keypoints in the grayscale images
-    # TODO: Try feature binning or bucketing
-    current_kp_left, current_des_left = sift.detectAndCompute(current_left_img, None)
-    current_kp_right, current_des_right = sift.detectAndCompute(current_right_img, None)
-    prev_kp_left, prev_des_left = sift.detectAndCompute(prev_left_img, None)
-    prev_kp_right, prev_des_right = sift.detectAndCompute(prev_right_img, None)
+        # Match the features across 2 frames
+        filt_current_left_kp, filt_prev_left_kp, filt_prev_right_kp = consistent_feature_matching(
+            current_kp_left, current_des_left, prev_kp_left, prev_des_left,
+            prev_kp_right, prev_des_right, sift_ratio
+        )
 
-    
-    # VIS: Draw keypoints on the left grayscale image
-    # img_with_kp = cv2.drawKeypoints(current_left_img, current_kp_left, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-    # right_img_with_kp = cv2.drawKeypoints(current_right_img, current_kp_right, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-    
-    # # VIS: Display the images with SIFT keypoints and the right grayscale image
-    # f, ax = plt.subplots(1, 2, figsize=(15, 5))
-    # ax[0].imshow(img_with_kp, cmap='gray')
-    # ax[0].set_title(f'Left Gray Image with SIFT Keypoints (Frame {i})')
+        if filt_current_left_kp is None or filt_prev_left_kp is None or filt_prev_right_kp is None:
+            print(f"Skipping frame {i} due to insufficient consistent keypoints.")
+            continue
 
-    # ax[1].imshow(right_img_with_kp, cmap='gray')
-    # ax[1].set_title(f'Right Gray Image (Frame {i})')
+        image_points = keypoints_to_np(filt_current_left_kp)
+        prev_2d_points_left = keypoints_to_np(filt_prev_left_kp)
+        prev_2d_points_right = keypoints_to_np(filt_prev_right_kp)
 
-    # plt.show()
-    
-    # Match the features
-    # TODO: Implement feature matching between current_left_img and prev_left_img using BFMatcher or FLANN
-    # temporal_matches = match_features(current_kp_left, prev_kp_left, current_des_left, prev_des_left, sift_ratio)
-    # prev_matches = match_features(temporal_matches[1], prev_kp_right, temporal_matches[3], prev_des_right, sift_ratio)
-    # print(len(temporal_matches[1]), len(prev_matches[0]))
+        # Get 3d points from the 2 stereo images from the previous timestep
+        prev_3d_points = cv2.triangulatePoints(
+            dataset.calib.P_rect_00, dataset.calib.P_rect_10,
+            prev_2d_points_left.T, prev_2d_points_right.T
+        )
+        prev_3d_points = cv2.convertPointsFromHomogeneous(prev_3d_points.T).reshape(-1, 3)
 
-    filt_current_left_kp, filt_prev_left_kp, filt_prev_right_kp = consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left, prev_des_left, 
-                                prev_kp_right, prev_des_right, sift_ratio)
-    # img3 = cv2.drawMatchesKnn(prev_left_img,prev_kp_left,current_left_img,current_kp_left,temporal_matches[-1],None,flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-    # plt.imshow(img3)
-    # plt.show()
+        # Use PnP with RANSAC for roto-translation estimation
+        _, rvec, translation_vector, _ = cv2.solvePnPRansac(
+            prev_3d_points, image_points, dataset.calib.K_cam0, None
+        )
 
-    # Skip frame if no consistent matches found
-    if filt_current_left_kp is None or filt_prev_left_kp is None or filt_prev_right_kp is None:
-        print(f"Skipping frame {i} due to insufficient consistent keypoints.")
-        continue
+        # Store the estimate as a transformation matrix
+        r_matrix = cv2.Rodrigues(rvec)[0]
+        transformation = np.eye(4)
+        transformation[:3, :3] = r_matrix
+        transformation[:3, 3] = translation_vector.T
 
-    # Convert keypoints to NumPy arrays
-    image_points = keypoints_to_np(filt_current_left_kp)
-    prev_2d_points_left = keypoints_to_np(filt_prev_left_kp)
-    prev_2d_points_right = keypoints_to_np(filt_prev_right_kp)
+        trajectory.append(trajectory[-1] @ np.linalg.inv(transformation))
 
+        # Plot the trajectory after processing each frame
+        if real_time:
+            positions = np.array([pose[:3, 3] for pose in trajectory])
 
-    # Perform triangulation 
-    # NOTE: Check if the input points must be in normalized coordinates
-    prev_3d_points = cv2.triangulatePoints(
-        dataset.calib.P_rect_00, dataset.calib.P_rect_10,
-        prev_2d_points_left.T, prev_2d_points_right.T
-    )
-    prev_3d_points = cv2.convertPointsFromHomogeneous(prev_3d_points.T).reshape(-1, 3)
+            ax.clear()
+            ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], label='Camera Trajectory')
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.set_title('Estimated Camera Trajectory')
+            ax.legend()
+            plt.pause(0.01)  # Pause to update the plot in real-time
 
-    # Motion estimation
-    # TODO: Use matched features to estimate motion between frames
+        print(f"Frame {i}: Pose: {trajectory[-1]}")
+        prev_left_img, prev_right_img = current_left_img, current_right_img
+        prev_kp_left, prev_des_left = current_kp_left, current_des_left
+        prev_kp_right, prev_des_right = current_kp_right, current_des_right
 
-    _, rvec, translation_vector, _ = cv2.solvePnPRansac(
-    prev_3d_points, image_points, dataset.calib.K_cam0, None
-    )
+    return trajectory
 
-    r_matrix = cv2.Rodrigues(rvec)[0]
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process KITTI dataset for visual odometry.")
+    parser.add_argument('--real_time', action='store_true', help="Run the script in real time mode.")
+    args = parser.parse_args()
 
-    # Debug visualization
-    print(f"Frame {i}: Rotation Vector: {rvec.T}, Translation Vector: {translation_vector.T}")
+    # Path to the KITTI dataset
+    basedir = "C:/Users/prec1/Documents/fer/rspa/perception/data_odometry_gray/dataset"
 
+    # Specify the sequence to load
+    sequence = '00'
 
-    # Local optimization
-    # TODO: Refine the estimated motion using local optimization techniques (e.g., bundle adjustment)
+    # Load the KITTI dataset
+    dataset = pykitti.odometry(basedir, sequence)
 
-    # Stop after a few frames for testing (optional)
-    # if i >= 5:  # Change 5 to a higher number to process more frames
-    #     break
+    trajectory = compute_odometry(dataset, args.real_time)
+
+    if not args.real_time:
+        positions = np.array([pose[:3, 3] for pose in trajectory])
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot(positions[:, 0], positions[:, 1], positions[:, 2], label='Camera Trajectory')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title('Estimated Camera Trajectory')
+        ax.legend()
+        plt.show()
