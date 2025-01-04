@@ -313,4 +313,4 @@ if __name__ == "__main__":
         ax.set_zlabel('Z')
         ax.set_title('Estimated Camera Trajectory')
         ax.legend()
-        plt.show()  # This will display the plot interactively
+    plt.show()
