@@ -1,9 +1,14 @@
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
 from mpl_toolkits.mplot3d import Axes3D
 import pykitti
 import argparse
+
+def savePoseKITTI(results_file, pose):
+    with open(results_file, 'a') as f:
+        f.write(f"{' '.join(f'{x:.6e}' for x in pose[:3,:4].flatten())}\r\n")
 
 def keypoints_to_np(keypoints):
     """
@@ -19,7 +24,7 @@ def keypoints_to_np(keypoints):
     return np.float32([kp.pt for kp in keypoints]).reshape(-1, 2)
 
 
-def match_features(kp1, kp2, des1, des2, ratio):
+def match_features(kp1, kp2, des1, des2, lowe_ratio=0.75, matcher=cv2.BFMatcher()):
     """
     Matches features between two sets of keypoints and descriptors using the BFMatcher.
 
@@ -28,15 +33,15 @@ def match_features(kp1, kp2, des1, des2, ratio):
         kp2 (list of cv2.KeyPoint): Keypoints from the second image.
         des1 (np.ndarray): Descriptors from the first image.
         des2 (np.ndarray): Descriptors from the second image.
-        ratio (float): Lowe's ratio for filtering good matches.
+        lowe_ratio (float): Lowe's ratio for filtering good matches.
+        matcher (cv2.BFMatcher): Matcher to use for feature matching.
 
     Returns:
         tuple: Matched keypoints and descriptors for both images and the matches list.
     """
 
-    bf = cv2.BFMatcher()
-    matches = bf.knnMatch(des1, des2, k=2)
-    good_matches = [[m] for m, n in matches if m.distance < ratio * n.distance]
+    matches = matcher.knnMatch(des1, des2, k=2)
+    good_matches = [[m] for m, n in matches if m.distance < lowe_ratio * n.distance]
 
     if len(good_matches) > 4:
         matched_kp1 = [kp1[m[0].queryIdx] for m in good_matches]
@@ -50,9 +55,11 @@ def match_features(kp1, kp2, des1, des2, ratio):
 
 
 def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left, prev_des_left, 
-                                prev_kp_right, prev_des_right, ratio):
+                                prev_kp_right, prev_des_right, lowe_ratio, matcher):
+    
+    
     matched_current_left_kp, matched_prev_left_kp, _, _, matches1 = match_features(
-        current_kp_left, prev_kp_left, current_des_left, prev_des_left, ratio
+        current_kp_left, prev_kp_left, current_des_left, prev_des_left, lowe_ratio, matcher
     )
     """
     Ensures consistency in feature matching across multiple frames.
@@ -64,7 +71,7 @@ def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left,
         prev_des_left (np.ndarray): Descriptors in the previous left image.
         prev_kp_right (list of cv2.KeyPoint): Keypoints in the previous right image.
         prev_des_right (np.ndarray): Descriptors in the previous right image.
-        ratio (float): Lowe's ratio for filtering good matches.
+        lowe_ratio (float): Lowe's ratio for filtering good matches.
 
     Returns:
         tuple: Consistent keypoints from the current left, previous left, and previous right images.
@@ -72,7 +79,7 @@ def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left,
 
     # Match current_left and prev_left
     matched_current_left_kp, matched_prev_left_kp, _, _, matches1 = match_features(
-        current_kp_left, prev_kp_left, current_des_left, prev_des_left, ratio
+        current_kp_left, prev_kp_left, current_des_left, prev_des_left, lowe_ratio, matcher
     )
     
     if not matches1:
@@ -81,7 +88,7 @@ def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left,
     
     # Match prev_left and prev_right
     _, matched_prev_right_kp, _, _, matches2 = match_features(
-        prev_kp_left, prev_kp_right, prev_des_left, prev_des_right, ratio
+        prev_kp_left, prev_kp_right, prev_des_left, prev_des_right, lowe_ratio, matcher
     )
 
     if not matches2:
@@ -108,22 +115,32 @@ def consistent_feature_matching(current_kp_left, current_des_left, prev_kp_left,
     return consistent_kp_current_left, consistent_kp_prev_left, consistent_kp_prev_right
 
 
-def compute_odometry(dataset, real_time, sift_ratio=0.75):
+def compute_odometry(dataset, real_time, lowe_ratio=0.75, results_file=None):
     """
     Computes the odometry trajectory for a dataset using feature matching and triangulation.
 
     Parameters:
         dataset (pykitti.odometry): KITTI odometry dataset instance.
         online (bool): If True, performs real-time visualization of the trajectory.
-        sift_ratio (float): Lowe's ratio for SIFT feature matching.
+        lowe_ratio (float): Lowe's ratio for feature matching.
 
     Returns:
         list: List of transformation matrices representing the trajectory.
     """
 
-    # Initialize SIFT detector
-    sift = cv2.SIFT_create()
-
+    # Initialize detector
+    # detector = cv2.ORB_create()
+    detector = cv2.SIFT_create()
+    # detector = cv2.xfeatures2d.SURF_create()
+    # detector = cv2.BRISK_create()
+    # detector = cv2.AKAZE_create()
+    # detector = cv2.KAZE_create()
+    # detector = cv2.FastFeatureDetector_create()
+    
+    # Initialize matcher
+    matcher = cv2.BFMatcher()
+    # matcher = cv2.DescriptorMatcher_create(cv2.DescriptorMatcher_FLANNBASED)
+    
     # Initialize variables
     prev_left_img, prev_right_img = None, None
     prev_kp_left, prev_des_left = None, None
@@ -148,27 +165,62 @@ def compute_odometry(dataset, real_time, sift_ratio=0.75):
             continue
         
         # Get features and their descriptors for the left and right camera images
-        current_kp_left, current_des_left = sift.detectAndCompute(current_left_img, None)
-        current_kp_right, current_des_right = sift.detectAndCompute(current_right_img, None)
+        current_kp_left, current_des_left = detector.detectAndCompute(current_left_img, None)
+        current_kp_right, current_des_right = detector.detectAndCompute(current_right_img, None)
 
         if prev_kp_left is None:
-            prev_kp_left, prev_des_left = sift.detectAndCompute(prev_left_img, None)
+            prev_kp_left, prev_des_left = detector.detectAndCompute(prev_left_img, None)
         if prev_kp_right is None:
-            prev_kp_right, prev_des_right = sift.detectAndCompute(prev_right_img, None)
+            prev_kp_right, prev_des_right = detector.detectAndCompute(prev_right_img, None)
 
         # Match the features across 2 frames
         filt_current_left_kp, filt_prev_left_kp, filt_prev_right_kp = consistent_feature_matching(
             current_kp_left, current_des_left, prev_kp_left, prev_des_left,
-            prev_kp_right, prev_des_right, sift_ratio
+            prev_kp_right, prev_des_right, lowe_ratio, matcher
         )
-
+        
         if filt_current_left_kp is None or filt_prev_left_kp is None or filt_prev_right_kp is None:
             print(f"Skipping frame {i} due to insufficient consistent keypoints.")
             continue
 
-        image_points = keypoints_to_np(filt_current_left_kp)
-        prev_2d_points_left = keypoints_to_np(filt_prev_left_kp)
-        prev_2d_points_right = keypoints_to_np(filt_prev_right_kp)
+        # Checking epipolar constraints
+        epipolar_errors = []
+        for j in range(len(filt_prev_left_kp)):
+            pt0 = filt_prev_left_kp[j].pt
+            pt1 = filt_prev_right_kp[j].pt
+            error = abs(pt0[1] - pt1[1])
+            epipolar_errors.append(error)
+        
+        # Checking disparity constraints
+        disparities = []
+        for k in range(len(filt_prev_left_kp)):
+            pt0 = filt_prev_left_kp[k].pt
+            pt1 = filt_prev_right_kp[k].pt
+            disparity = pt0[0] - pt1[0]
+            disparities.append(disparity)
+        
+        matches0 = []
+        matches0_prev = []
+        matches1_prev = []
+        fails = []
+        
+        # Checking if disparity is positive and epipolar error is less than 1.0
+        for j in range(len(filt_prev_left_kp)):
+            if disparities[j] > 0 and epipolar_errors[j] < 1.0:
+                matches0.append(filt_current_left_kp[j])
+                matches0_prev.append(filt_prev_left_kp[j])
+                matches1_prev.append(filt_prev_right_kp[j])
+            else:
+                fails.append(filt_prev_left_kp[j])
+
+        image_points = keypoints_to_np(matches0)
+        prev_2d_points_left = keypoints_to_np(matches0_prev)
+        prev_2d_points_right = keypoints_to_np(matches1_prev)
+
+
+        # image_points = keypoints_to_np(filt_current_left_kp)
+        # prev_2d_points_left = keypoints_to_np(filt_prev_left_kp)
+        # prev_2d_points_right = keypoints_to_np(filt_prev_right_kp)
 
         # Get 3d points from the 2 stereo images from the previous timestep
         prev_3d_points = cv2.triangulatePoints(
@@ -178,9 +230,14 @@ def compute_odometry(dataset, real_time, sift_ratio=0.75):
         prev_3d_points = cv2.convertPointsFromHomogeneous(prev_3d_points.T).reshape(-1, 3)
 
         # Use PnP with RANSAC for roto-translation estimation
-        _, rvec, translation_vector, _ = cv2.solvePnPRansac(
-            prev_3d_points, image_points, dataset.calib.K_cam0, None
-        )
+        if prev_3d_points.shape[0] > 3:
+            print(f"Solving PnP RANSAC for {prev_3d_points.shape[0]} points")
+            _, rvec, translation_vector, _ = cv2.solvePnPRansac(
+                prev_3d_points, image_points, dataset.calib.K_cam0, None, flags=cv2.USAC_MAGSAC
+            )
+        else:
+            print("PnP RANSAC failed")
+            continue
 
         # Store the estimate as a transformation matrix
         r_matrix = cv2.Rodrigues(rvec)[0]
@@ -189,6 +246,9 @@ def compute_odometry(dataset, real_time, sift_ratio=0.75):
         transformation[:3, 3] = translation_vector.T
 
         trajectory.append(trajectory[-1] @ np.linalg.inv(transformation))
+
+        if results_file:
+            savePoseKITTI(results_file, trajectory[-1])
 
         # Plot the trajectory after processing each frame
         if real_time:
@@ -213,18 +273,35 @@ def compute_odometry(dataset, real_time, sift_ratio=0.75):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process KITTI dataset for visual odometry.")
     parser.add_argument('--real_time', action='store_true', help="Run the script in real time mode.")
+    parser.add_argument('--frames', type=int, default=None, help="Number of frames to process. Default is full sequence")
     args = parser.parse_args()
-
-    # Path to the KITTI dataset
-    basedir = "C:/Users/prec1/Documents/fer/rspa/perception/data_odometry_gray/dataset"
 
     # Specify the sequence to load
     sequence = '00'
+    experiment = '2'
+    
+    # Path to the KITTI dataset
+    basedir = "/home/patweatharva/IFROS/rspa/tdv_lab/data_odometry_gray/dataset"
+    results_dir = f"/home/patweatharva/IFROS/rspa/tdv_lab/data_odometry_gray/dataset/results/{sequence}"
+    
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+
+    results_file = os.path.join(results_dir, f"{sequence}_{experiment}.txt")
+    if not os.path.exists(results_file):
+        print(f"Results file {sequence}.txt does not exist. Creating it...")
+        with open(results_file, 'w') as f:
+            f.write("")
+            
 
     # Load the KITTI dataset
-    dataset = pykitti.odometry(basedir, sequence)
+    if args.frames is not None:
+        frames = [i for i in range(args.frames)]
+    else:
+        frames = None
+    dataset = pykitti.odometry(basedir, sequence, frames=frames)
 
-    trajectory = compute_odometry(dataset, args.real_time)
+    trajectory = compute_odometry(dataset, args.real_time, lowe_ratio=0.75, results_file=results_file)
 
     if not args.real_time:
         positions = np.array([pose[:3, 3] for pose in trajectory])
@@ -236,4 +313,4 @@ if __name__ == "__main__":
         ax.set_zlabel('Z')
         ax.set_title('Estimated Camera Trajectory')
         ax.legend()
-        plt.show()
+        plt.show()  # This will display the plot interactively
