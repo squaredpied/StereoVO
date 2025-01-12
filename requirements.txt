@@ -1,0 +1,9 @@
+numpy>=1.24.0
+opencv-python>=4.8.0
+matplotlib>=3.7.0
+pykitti>=0.3.1
+pyyaml>=6.0.1
+argparse>=1.4.0
+scipy>=1.10.0
+tqdm>=4.65.0
+

@@ -3,3 +3,5 @@ data_odometry_calib/
 data_odometry_poses/
 zips/
 .vscode/
+svo2.py
+bundle.py

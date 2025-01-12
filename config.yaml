@@ -1,0 +1,47 @@
+# Please maintain the default directory structure as it is in the kitti dataset
+
+# basedir should have this structure:
+
+# data_odometry_gray/dataset/
+# ├── sequences/
+# │   ├── 00/
+# │   │   ├── image_0/      # Left camera images
+# │   │   ├── image_1/      # Right camera images
+# │   │   ├── times.txt     # Timestamps for each frame
+# │   │   └── calib.txt     # Calibration data
+# │   ├── 01/
+# │   ├── 02/
+# │   └── ...
+# ├── poses/                 # Ground truth poses
+# |   ├── 00.txt
+# |   ├── 01.txt 
+# |   └── ...
+# ├── results/                # Results directory for storing results (will be created if not present)
+# |   ├── 00/
+# |   │   ├── 00_1.txt
+# |   │   └── ...
+# |   ├── 01/
+# |   └── ...
+
+
+basedir: "/path/to/your/kitti/dataset/data_odometry_gray/dataset"
+results_dir: "/path/to/your/results/directory/data_odometry_gray/dataset/results"
+sequence: "06"
+experiment: 6
+
+# Feature detection and matching parameters
+detector: "SIFT"  # Options: ORB, SIFT, SURF, BRISK, AKAZE, KAZE, FAST
+matcher: "BF"     # Options: BF, FLANN
+lowe_ratio: 0.75
+
+# Epipolar and disparity constraints
+max_epipolar_error: 1.0
+min_disparity: 0.0
+
+# PnP RANSAC parameters
+pnp_method: "USAC_MAGSAC"
+
+# Visualization parameters
+real_time: false
+figure_size: [10, 7]
+
